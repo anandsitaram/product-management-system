@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS refresh_tokens;
+DROP TABLE IF EXISTS product_images;
+DROP TABLE IF EXISTS product_labels;
+DROP TABLE IF EXISTS products;
+DROP TABLE IF EXISTS labels;
+DROP TABLE IF EXISTS categories;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS roles;

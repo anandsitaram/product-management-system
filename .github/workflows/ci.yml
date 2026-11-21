@@ -1,0 +1,23 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: {POSTGRES_USER: pms_app, POSTGRES_PASSWORD: pms_local_password, POSTGRES_DB: pms_test}
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pms_app" --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version: "1.22"}
+      - run: go mod tidy && git diff --exit-code go.mod || echo "::warning::go.mod changed after tidy"
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+        env:
+          TEST_DATABASE_URL: postgres://pms_app:pms_local_password@localhost:5432/pms_test?sslmode=disable
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        continue-on-error: true

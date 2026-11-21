@@ -1,0 +1,582 @@
+openapi: 3.0.3
+info:
+  title: Product Management System API
+  version: 1.0.0
+  description: |
+    REST API for managing products, categories, labels, images, users and audit logs.
+    All successful responses are wrapped as `{data, meta}` (lists add `pagination`);
+    errors are `{error:{code,message,details?}, meta}`.
+servers:
+  - url: http://localhost:8080
+security:
+  - bearerAuth: []
+tags:
+  - {name: Auth}
+  - {name: Users}
+  - {name: Products}
+  - {name: Images}
+  - {name: Categories}
+  - {name: Labels}
+  - {name: Audit}
+  - {name: Operations}
+paths:
+  /health:
+    get:
+      tags: [Operations]
+      summary: Liveness probe
+      security: []
+      responses:
+        '200': {description: Alive}
+  /ready:
+    get:
+      tags: [Operations]
+      summary: Readiness probe (database and storage). Requires the ops bearer token when OPS_TOKEN is set.
+      security: []
+      responses:
+        '200': {description: Ready}
+        '503': {description: A dependency is unavailable}
+  /metrics:
+    get:
+      tags: [Operations]
+      summary: Prometheus metrics. Requires the ops bearer token when OPS_TOKEN is set.
+      security: []
+      responses:
+        '200': {description: Prometheus text format, content: {text/plain: {schema: {type: string}}}}
+  /api/v1/auth/token:
+    post:
+      tags: [Auth]
+      summary: Log in and obtain an access/refresh token pair
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string, description: Username or email, example: admin}
+                password: {type: string, format: password}
+      responses:
+        '200': {description: Authenticated, content: {application/json: {schema: {$ref: '#/components/schemas/TokenEnvelope'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate a refresh token (the old token is revoked; replaying it revokes the whole session set)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: {type: string}
+      responses:
+        '200': {description: New token pair, content: {application/json: {schema: {$ref: '#/components/schemas/TokenEnvelope'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke a refresh token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: {type: string}
+      responses:
+        '204': {description: Revoked}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/users:
+    get:
+      tags: [Users]
+      summary: List users (ADMIN)
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: role, in: query, schema: {$ref: '#/components/schemas/Role'}}
+        - {name: is_active, in: query, schema: {type: boolean}}
+        - {name: search, in: query, schema: {type: string, maxLength: 100}}
+      responses:
+        '200': {description: Users, content: {application/json: {schema: {$ref: '#/components/schemas/UserList'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [Users]
+      summary: Create a user (ADMIN)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserCreate'}
+      responses:
+        '201': {description: Created, content: {application/json: {schema: {$ref: '#/components/schemas/UserEnvelope'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/users/{userId}:
+    parameters:
+      - {name: userId, in: path, required: true, schema: {type: string, format: uuid}}
+    get:
+      tags: [Users]
+      summary: Get a user (ADMIN)
+      responses:
+        '200': {description: User, content: {application/json: {schema: {$ref: '#/components/schemas/UserEnvelope'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [Users]
+      summary: Update email, password, role or active flag (ADMIN). Cannot demote/deactivate yourself or the last admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserUpdate'}
+      responses:
+        '200': {description: Updated, content: {application/json: {schema: {$ref: '#/components/schemas/UserEnvelope'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /api/v1/products:
+    get:
+      tags: [Products]
+      summary: Search, filter, sort and paginate products (ADMIN, MANAGER, VIEWER)
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: search, in: query, description: 'Case-insensitive match on SKU, name or description', schema: {type: string, maxLength: 100}}
+        - {name: category_id, in: query, schema: {type: string, format: uuid}}
+        - {name: label_id, in: query, schema: {type: string, format: uuid}}
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/ProductStatus'}}
+        - {name: min_price, in: query, schema: {type: number, minimum: 0}}
+        - {name: max_price, in: query, schema: {type: number, minimum: 0}}
+        - {name: sort_by, in: query, schema: {type: string, enum: [name, sku, price, created_at, updated_at], default: created_at}}
+        - {name: order, in: query, description: 'Defaults to desc for created_at/updated_at, asc otherwise', schema: {type: string, enum: [asc, desc]}}
+      responses:
+        '200': {description: Products, content: {application/json: {schema: {$ref: '#/components/schemas/ProductList'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [Products]
+      summary: Create a product (ADMIN, MANAGER)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProductInput'}
+      responses:
+        '201': {description: Created, content: {application/json: {schema: {$ref: '#/components/schemas/ProductEnvelope'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /api/v1/products/{productId}:
+    parameters:
+      - {$ref: '#/components/parameters/ProductId'}
+    get:
+      tags: [Products]
+      summary: Get a product (soft-deleted products are 404)
+      responses:
+        '200': {description: Product, content: {application/json: {schema: {$ref: '#/components/schemas/ProductEnvelope'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [Products]
+      summary: Replace a product (ADMIN, MANAGER). Omitted optional fields reset to defaults; label_ids is replaced.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProductInput'}
+      responses:
+        '200': {description: Updated, content: {application/json: {schema: {$ref: '#/components/schemas/ProductEnvelope'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+    patch:
+      tags: [Products]
+      summary: Partially update a product (ADMIN, MANAGER). Absent = unchanged; null clears description/category_id; label_ids replaces the label set.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProductPatch'}
+      responses:
+        '200': {description: Updated, content: {application/json: {schema: {$ref: '#/components/schemas/ProductEnvelope'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+    delete:
+      tags: [Products]
+      summary: Soft-delete a product (ADMIN)
+      responses:
+        '204': {description: Deleted}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/products/{productId}/images:
+    parameters:
+      - {$ref: '#/components/parameters/ProductId'}
+    get:
+      tags: [Images]
+      summary: List image metadata with short-lived signed URLs (all roles). Primary image first.
+      responses:
+        '200': {description: Images, content: {application/json: {schema: {type: object, properties: {data: {type: array, items: {$ref: '#/components/schemas/Image'}}}}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      tags: [Images]
+      summary: Upload a JPEG/PNG/WebP image (ADMIN, MANAGER). Max size and count are configurable (default 5 MB, 5 images).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+                is_primary: {type: boolean, description: Make this the primary image. The first image is always primary.}
+      responses:
+        '201': {description: Uploaded, content: {application/json: {schema: {type: object, properties: {data: {$ref: '#/components/schemas/Image'}}}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '413': {description: File too large}
+        '415': {description: 'Not a JPEG, PNG or WebP image (checked by file signature)'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /api/v1/products/{productId}/images/{imageId}:
+    parameters:
+      - {$ref: '#/components/parameters/ProductId'}
+      - {name: imageId, in: path, required: true, schema: {type: string, format: uuid}}
+    patch:
+      tags: [Images]
+      summary: Mark an image as the primary image (ADMIN, MANAGER)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [is_primary], properties: {is_primary: {type: boolean, enum: [true]}}}
+      responses:
+        '200': {description: Updated, content: {application/json: {schema: {type: object, properties: {data: {$ref: '#/components/schemas/Image'}}}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+    delete:
+      tags: [Images]
+      summary: Delete an image (ADMIN, MANAGER). If it was primary, the oldest remaining image is promoted.
+      responses:
+        '204': {description: Deleted}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/categories:
+    get:
+      tags: [Categories]
+      summary: List categories (all roles)
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: search, in: query, schema: {type: string}}
+        - {name: is_active, in: query, schema: {type: boolean}}
+      responses:
+        '200': {description: Categories, content: {application/json: {schema: {$ref: '#/components/schemas/CategoryList'}}}}
+    post:
+      tags: [Categories]
+      summary: Create a category (ADMIN, MANAGER)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CategoryCreate'}
+      responses:
+        '201': {description: Created, content: {application/json: {schema: {$ref: '#/components/schemas/CategoryEnvelope'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/categories/{categoryId}:
+    parameters:
+      - {name: categoryId, in: path, required: true, schema: {type: string, format: uuid}}
+    get:
+      tags: [Categories]
+      summary: Get a category
+      responses:
+        '200': {description: Category, content: {application/json: {schema: {$ref: '#/components/schemas/CategoryEnvelope'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [Categories]
+      summary: Update a category (ADMIN, MANAGER)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CategoryUpdate'}
+      responses:
+        '200': {description: Updated, content: {application/json: {schema: {$ref: '#/components/schemas/CategoryEnvelope'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+    delete:
+      tags: [Categories]
+      summary: Deactivate a category (ADMIN, MANAGER). Existing products keep their category; it cannot be newly assigned.
+      responses:
+        '204': {description: Deactivated}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/labels:
+    get:
+      tags: [Labels]
+      summary: List labels (all roles)
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: search, in: query, schema: {type: string}}
+        - {name: is_active, in: query, schema: {type: boolean}}
+      responses:
+        '200': {description: Labels, content: {application/json: {schema: {$ref: '#/components/schemas/LabelList'}}}}
+    post:
+      tags: [Labels]
+      summary: Create a label (ADMIN, MANAGER)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [name], properties: {name: {type: string, maxLength: 80}}}
+      responses:
+        '201': {description: Created, content: {application/json: {schema: {$ref: '#/components/schemas/LabelEnvelope'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/labels/{labelId}:
+    parameters:
+      - {name: labelId, in: path, required: true, schema: {type: string, format: uuid}}
+    get:
+      tags: [Labels]
+      summary: Get a label
+      responses:
+        '200': {description: Label, content: {application/json: {schema: {$ref: '#/components/schemas/LabelEnvelope'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [Labels]
+      summary: Update a label (ADMIN, MANAGER)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, properties: {name: {type: string, maxLength: 80}, is_active: {type: boolean}}}
+      responses:
+        '200': {description: Updated, content: {application/json: {schema: {$ref: '#/components/schemas/LabelEnvelope'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+    delete:
+      tags: [Labels]
+      summary: Deactivate a label (ADMIN, MANAGER)
+      responses:
+        '204': {description: Deactivated}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/audit-logs:
+    get:
+      tags: [Audit]
+      summary: Query audit events (ADMIN)
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: user_id, in: query, schema: {type: string, format: uuid}}
+        - {name: action, in: query, schema: {type: string, example: product.delete}}
+        - {name: entity_type, in: query, schema: {type: string, example: product}}
+        - {name: entity_id, in: query, schema: {type: string, format: uuid}}
+        - {name: from, in: query, schema: {type: string, format: date-time}}
+        - {name: to, in: query, schema: {type: string, format: date-time}}
+      responses:
+        '200': {description: Audit logs, content: {application/json: {schema: {$ref: '#/components/schemas/AuditList'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    Page: {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+    Limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 20}}
+    ProductId: {name: productId, in: path, required: true, schema: {type: string, format: uuid}}
+  responses:
+    ValidationError: {description: 'Malformed request or failed field validation (400)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Unauthorized: {description: 'Missing, invalid or expired credentials (401)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Forbidden: {description: 'Role lacks permission (403)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    NotFound: {description: 'Resource not found (404)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Conflict: {description: 'Duplicate unique value, e.g. SKU or name (409)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Unprocessable: {description: 'Well-formed but violates a business rule (422)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    RateLimited: {description: 'Too many requests (429)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    Role: {type: string, enum: [ADMIN, MANAGER, VIEWER]}
+    ProductStatus: {type: string, enum: [DRAFT, ACTIVE, INACTIVE]}
+    Meta: {type: object, properties: {request_id: {type: string}}}
+    Pagination:
+      type: object
+      properties: {page: {type: integer}, limit: {type: integer}, total: {type: integer, format: int64}, total_pages: {type: integer}}
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: {type: string, example: VALIDATION_ERROR}
+            message: {type: string}
+            details: {type: array, items: {type: object, properties: {field: {type: string}, message: {type: string}}}}
+        meta: {$ref: '#/components/schemas/Meta'}
+    User:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        username: {type: string}
+        email: {type: string}
+        role: {$ref: '#/components/schemas/Role'}
+        is_active: {type: boolean}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    UserEnvelope: {type: object, properties: {data: {$ref: '#/components/schemas/User'}, meta: {$ref: '#/components/schemas/Meta'}}}
+    UserList:
+      type: object
+      properties: {data: {type: array, items: {$ref: '#/components/schemas/User'}}, pagination: {$ref: '#/components/schemas/Pagination'}, meta: {$ref: '#/components/schemas/Meta'}}
+    UserCreate:
+      type: object
+      required: [username, email, password, role]
+      properties:
+        username: {type: string, minLength: 3, maxLength: 80, pattern: '^[A-Za-z0-9._-]+$'}
+        email: {type: string, format: email}
+        password: {type: string, format: password, minLength: 10, maxLength: 128, description: Must contain a letter and a digit}
+        role: {$ref: '#/components/schemas/Role'}
+        is_active: {type: boolean, default: true}
+    UserUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        email: {type: string, format: email}
+        password: {type: string, format: password}
+        role: {$ref: '#/components/schemas/Role'}
+        is_active: {type: boolean}
+    TokenEnvelope:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            access_token: {type: string}
+            token_type: {type: string, example: Bearer}
+            expires_in: {type: integer, description: Seconds}
+            refresh_token: {type: string}
+            user: {$ref: '#/components/schemas/User'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    CategoryRef: {type: object, nullable: true, properties: {id: {type: string, format: uuid}, name: {type: string}}}
+    LabelRef: {type: object, properties: {id: {type: string, format: uuid}, name: {type: string}}}
+    Product:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        sku: {type: string}
+        name: {type: string}
+        description: {type: string, nullable: true}
+        price: {type: number, example: 19.99}
+        stock_quantity: {type: integer}
+        category_id: {type: string, format: uuid, nullable: true}
+        category: {$ref: '#/components/schemas/CategoryRef'}
+        status: {$ref: '#/components/schemas/ProductStatus'}
+        labels: {type: array, items: {$ref: '#/components/schemas/LabelRef'}}
+        created_by: {type: string, format: uuid, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    ProductEnvelope: {type: object, properties: {data: {$ref: '#/components/schemas/Product'}, meta: {$ref: '#/components/schemas/Meta'}}}
+    ProductList:
+      type: object
+      properties: {data: {type: array, items: {$ref: '#/components/schemas/Product'}}, pagination: {$ref: '#/components/schemas/Pagination'}, meta: {$ref: '#/components/schemas/Meta'}}
+    ProductInput:
+      type: object
+      required: [sku, name, price]
+      properties:
+        sku: {type: string, maxLength: 80}
+        name: {type: string, maxLength: 200}
+        description: {type: string, nullable: true, maxLength: 10000}
+        price: {type: number, minimum: 0, multipleOf: 0.01, example: 19.99}
+        stock_quantity: {type: integer, minimum: 0, default: 0}
+        category_id: {type: string, format: uuid, nullable: true}
+        status: {$ref: '#/components/schemas/ProductStatus'}
+        label_ids: {type: array, maxItems: 50, items: {type: string, format: uuid}}
+    ProductPatch:
+      type: object
+      minProperties: 1
+      properties:
+        sku: {type: string, maxLength: 80}
+        name: {type: string, maxLength: 200}
+        description: {type: string, nullable: true}
+        price: {type: number, minimum: 0}
+        stock_quantity: {type: integer, minimum: 0}
+        category_id: {type: string, format: uuid, nullable: true}
+        status: {$ref: '#/components/schemas/ProductStatus'}
+        label_ids: {type: array, items: {type: string, format: uuid}}
+    Image:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        product_id: {type: string, format: uuid}
+        original_filename: {type: string}
+        content_type: {type: string, enum: [image/jpeg, image/png, image/webp]}
+        file_size: {type: integer, format: int64}
+        is_primary: {type: boolean}
+        created_at: {type: string, format: date-time}
+        url: {type: string, description: Short-lived signed URL}
+        url_expires_at: {type: string, format: date-time}
+    Category:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        description: {type: string, nullable: true}
+        is_active: {type: boolean}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CategoryEnvelope: {type: object, properties: {data: {$ref: '#/components/schemas/Category'}, meta: {$ref: '#/components/schemas/Meta'}}}
+    CategoryList:
+      type: object
+      properties: {data: {type: array, items: {$ref: '#/components/schemas/Category'}}, pagination: {$ref: '#/components/schemas/Pagination'}, meta: {$ref: '#/components/schemas/Meta'}}
+    CategoryCreate: {type: object, required: [name], properties: {name: {type: string, maxLength: 120}, description: {type: string, nullable: true}}}
+    CategoryUpdate: {type: object, minProperties: 1, properties: {name: {type: string, maxLength: 120}, description: {type: string, nullable: true}, is_active: {type: boolean}}}
+    Label:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        is_active: {type: boolean}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    LabelEnvelope: {type: object, properties: {data: {$ref: '#/components/schemas/Label'}, meta: {$ref: '#/components/schemas/Meta'}}}
+    LabelList:
+      type: object
+      properties: {data: {type: array, items: {$ref: '#/components/schemas/Label'}}, pagination: {$ref: '#/components/schemas/Pagination'}, meta: {$ref: '#/components/schemas/Meta'}}
+    AuditLog:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        user_id: {type: string, format: uuid, nullable: true}
+        action: {type: string, example: product.update}
+        entity_type: {type: string}
+        entity_id: {type: string, format: uuid, nullable: true}
+        changes: {type: object, nullable: true, additionalProperties: true}
+        request_id: {type: string, nullable: true}
+        created_at: {type: string, format: date-time}
+    AuditList:
+      type: object
+      properties: {data: {type: array, items: {$ref: '#/components/schemas/AuditLog'}}, pagination: {$ref: '#/components/schemas/Pagination'}, meta: {$ref: '#/components/schemas/Meta'}}

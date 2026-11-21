@@ -1,0 +1,7 @@
+.git
+.env
+data
+*.md
+tests
+go.sandbox.mod
+go.sandbox.sum

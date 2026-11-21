@@ -1,0 +1,14 @@
+# Only the dependencies (no API container): run the API on your host with `make run`.
+#   docker compose -f docker-compose.deps.yml up -d
+services:
+  db:
+    image: postgres:16-alpine
+    environment: {POSTGRES_USER: pms_app, POSTGRES_PASSWORD: pms_local_password, POSTGRES_DB: pms}
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pms_app -d pms"]
+      interval: 5s
+      retries: 20
+volumes:
+  pgdata:
